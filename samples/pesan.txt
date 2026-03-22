@@ -1,0 +1,7 @@
+Pesan rahasia untuk Tugas 2 II4021 Kriptografi
+Institut Teknologi Bandung - Kelompok 6
+
+Test payload untuk enkripsi A5/1 dan steganografi LSB.
+Ukuran: 128 bytes (cocok 1-2 frame).
+
+Verifikasi MD5: d41d8cd98f00b204e9800998ecf8427e
