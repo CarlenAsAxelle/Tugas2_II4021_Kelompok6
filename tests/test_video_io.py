@@ -11,19 +11,19 @@ from src.video_io import (
     color_histogram_frame, color_histogram_video
 )
 
-@pytest.fixture
-def sample_video_path():
-    return "samples/sample_video.avi"
+SAMPLE_VIDEO = "samples/sample_video.avi"
 
 @pytest.fixture
 def sample_frames():
     """
-    Buat sample 2 frame kecil untuk testing (640x480x3 BGR).
+    Load 2 frame pertama dari sample_video.avi (bukan random).
     """
-    np.random.seed(42)  # reproducible
-    frame1 = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
-    frame2 = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
-    return [frame1, frame2], 30.0
+    if not os.path.exists(SAMPLE_VIDEO):
+        pytest.skip(f"Sample video tidak ada: {SAMPLE_VIDEO}")
+    
+    frames, fps = read_video_frames(SAMPLE_VIDEO)
+    assert len(frames) >= 2, "Video harus punya minimal 2 frame"
+    return frames[:2], fps  # ambil 2 frame pertama saja
 
 def test_read_write_video_cycle(sample_frames, tmp_path):
     frames, fps = sample_frames
