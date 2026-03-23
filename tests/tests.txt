@@ -1,0 +1,12 @@
+# Install pytest
+pip install pytest
+
+# Run test
+
+python tests/test_a51_cipher.py
+
+pytest tests/test_stego_lsb.py -v -s
+
+pytest tests/test_video_io.py -v -s --tb=long
+
+pytest tests/test_stego_video.py -v -s
