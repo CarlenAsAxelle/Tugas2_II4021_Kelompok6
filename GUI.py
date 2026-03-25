@@ -109,13 +109,13 @@ class StegoApp:
         self.output_text = tk.Text(frame, height=10)
         self.output_text.pack()
 
-    # ==============================
-    # FUNCTIONS
-    # ==============================
-
     def select_video(self):
         self.video_path = filedialog.askopenfilename(filetypes=[("Video", "*.avi *.mp4")])
         self.video_label.config(text=self.video_path)
+        #load videonya (kyk media player)
+        if self.video_path:
+            self.load_video(self.video_path)
+            self.play_video()
 
     def run_embed(self):
         try:
@@ -170,13 +170,10 @@ class StegoApp:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # ==============================
-    # VIDEO PLAYER
-    # ==============================
-
     def load_video(self, path):
         self.video_frames, self.fps = read_video_frames(path)
         self.current_frame = 0
+        self.playing = False
 
     def play_video(self):
         self.playing = True
