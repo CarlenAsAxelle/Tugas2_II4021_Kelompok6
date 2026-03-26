@@ -2,4 +2,5 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 pytest>=7.0
 matplotlib  
-PyQt5  
+PyQt5
+ffmpeg-python>=0.2.1  

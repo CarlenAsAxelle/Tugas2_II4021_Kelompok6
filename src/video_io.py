@@ -9,51 +9,45 @@ def read_video_frames(path: str) -> Tuple[List[np.ndarray], float]:
     """
     Baca semua frame dari video AVI.
     Return: (list_frame_BGR_uint8, fps)
+    
+    Note: Reads frames incrementally into a list to avoid massive memory allocation.
+    For large videos, this is more efficient than pre-allocating a giant buffer.
     """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {path}")
 
-    fps        = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    h          = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    w          = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-    # Pre-allocate buffer when frame count is known and reliable
-    if frame_count > 0 and h > 0 and w > 0:
-        buf    = np.empty((frame_count, h, w, 3), dtype=np.uint8)
-        actual = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if actual < frame_count:
-                buf[actual] = frame
-            actual += 1
-        cap.release()
-        frames = [buf[i] for i in range(min(actual, frame_count))]
-    else:
-        frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames.append(frame)
-        cap.release()
-
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    # Read frames incrementally - this avoids OOM errors on large videos
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    
+    cap.release()
     return frames, fps
 
 
 def write_video_frames(path: str, frames: List[np.ndarray], fps: float):
     """
-    Tulis list frame ke file AVI.
+    Tulis list frame ke file AVI dengan codec lossless (FFv1).
     """
     if not frames:
         raise ValueError("frames is empty")
 
     h, w, _ = frames[0].shape
-    fourcc   = cv2.VideoWriter_fourcc(*"XVID")
+    # Use FFv1 which is lossless - essential for preserving LSBs in steganography
+    fourcc   = cv2.VideoWriter_fourcc(*"FFV1")
     out      = cv2.VideoWriter(path, fourcc, fps, (w, h))
+
+    if not out.isOpened():
+        # FFv1 might not be available, try with MJPEG as fallback (still better than XVID for LSBs)
+        print("Warning: FFv1 codec not available, using MJPG (lossless-ish) codec")
+        fourcc   = cv2.VideoWriter_fourcc(*"MJPG")
+        out      = cv2.VideoWriter(path, fourcc, fps, (w, h))
 
     for f in frames:
         out.write(f)

@@ -11,8 +11,16 @@ import datetime
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 
-from src.stego_video import embed_message, extract_message
-from src.video_io import read_video_frames, color_histogram_video, mse_psnr_video
+# Import based on format - will select at runtime in embed function
+from src.stego_video import embed_message as embed_avi, extract_message as extract_avi
+try:
+    from src.stego_video_mp4 import embed_message as embed_mp4, extract_message as extract_mp4
+except ImportError:
+    embed_mp4 = embed_avi
+    extract_mp4 = extract_avi
+
+from src.video_io_mp4 import read_video_frames, get_format, mse_psnr_video
+from src.video_io import color_histogram_video  # For histogram only
 
 # ─── PALETTE ──────────────────────────────────────────────────────────────────
 BG        = "#1a1a2e"
@@ -67,6 +75,7 @@ class StegoApp:
         self.playing        = False
         self.video_selected = False
         self.video_path     = None
+        self.video_format   = None  # "avi" or "mp4"
         self._play_job      = None
 
         # ── compare-tab state
@@ -139,11 +148,16 @@ class StegoApp:
         self.embed_video_lbl = _make_label(left, "No video selected",
                                            fg=MUTED, bg=PANEL,
                                            font=("Segoe UI", 8))
-        self.embed_video_lbl.grid(row=2, column=0, sticky="w", pady=(2, 10))
+        self.embed_video_lbl.grid(row=2, column=0, sticky="w", pady=(2, 0))
+
+        self.embed_format_lbl = _make_label(left, "",
+                                            fg=SUCCESS, bg=PANEL,
+                                            font=("Segoe UI", 7))
+        self.embed_format_lbl.grid(row=2, column=0, sticky="e", pady=(2, 0))
 
         _make_label(left, "MESSAGE", fg=ACCENT,
                     font=("Segoe UI", 8, "bold"), bg=PANEL).grid(
-            row=3, column=0, sticky="w")
+            row=3, column=0, sticky="w", pady=(10, 0))
         _make_label(left, "Leave blank to embed a file instead",
                     fg=MUTED, font=("Segoe UI", 7), bg=PANEL).grid(
             row=4, column=0, sticky="w", pady=(0, 4))
@@ -277,7 +291,10 @@ class StegoApp:
         if not self.video_selected:
             path = filedialog.askopenfilename(
                 title="Select Cover Video",
-                filetypes=[("Video files", "*.avi *.mp4")])
+                filetypes=[("Video files", "*.avi *.mp4"),
+                          ("AVI video", "*.avi"),
+                          ("MP4 video", "*.mp4"),
+                          ("All files", "*.*")])
             if not path:
                 return
             self.video_path = path
@@ -293,15 +310,18 @@ class StegoApp:
                 self._play_job = None
             self.playing        = False
             self.video_path     = None
+            self.video_format   = None
             self.video_frames   = []
             self.video_selected = False
             self.embed_canvas.config(image="")
             self.embed_video_lbl.config(text="No video selected", fg=MUTED)
+            self.embed_format_lbl.config(text="")
             self.embed_select_btn.config(text="📂  Select Cover Video")
 
     def _load_video(self, path):
         self.video_frames, self.fps = read_video_frames(path)
-        self.current_frame = 0
+        self.video_format = get_format(path).upper()  # "AVI" or "MP4"
+        self.embed_format_lbl.config(text=f"[{self.video_format}]", fg=SUCCESS)
 
     def _play_video(self):
         self.playing = True
@@ -353,30 +373,44 @@ class StegoApp:
         if use_encrypt:
             raw = self._get_key(self.key_entry, "e.g. 0x123456789ABCDEF0")
             if not raw:
-                messagebox.showerror("Error", "Enter an A5/1 key (e.g. 0x123456789ABCDEF0)")
-                return
-            try:
-                a51_key = int(raw, 0)
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid A5/1 key: '{raw}'")
-                return
+                # Generate random A5/1 key (64-bit)
+                import random
+                a51_key = random.getrandbits(64)
+                messagebox.showinfo("Info", f"Generated random A5/1 key:\n0x{a51_key:016x}")
+            else:
+                try:
+                    a51_key = int(raw, 0)
+                except ValueError:
+                    messagebox.showerror("Error", f"Invalid A5/1 key: '{raw}'")
+                    return
 
         if use_random:
             raw = self._get_key(self.stego_key_entry, "Stego key (integer)")
             if not raw:
-                messagebox.showerror("Error", "Enter a stego key (integer) for random mode.")
-                return
-            try:
-                stego_key = int(raw)
-            except ValueError:
-                messagebox.showerror("Error", f"Invalid stego key: '{raw}'")
-                return
+                # Generate random stego key (32-bit seed)
+                import random
+                stego_key = random.getrandbits(32)
+                messagebox.showinfo("Info", f"Generated random stego key:\n{stego_key}")
+            else:
+                try:
+                    stego_key = int(raw)
+                except ValueError:
+                    messagebox.showerror("Error", f"Invalid stego key: '{raw}'")
+                    return
 
         # Output path on main thread
+        # Default to same format as input
+        if self.video_format == "MP4":
+            default_ext = ".mp4"
+            filetypes = [("MP4 video", "*.mp4"), ("AVI video", "*.avi")]
+        else:
+            default_ext = ".avi"
+            filetypes = [("AVI video", "*.avi"), ("MP4 video", "*.mp4")]
+        
         output_path = filedialog.asksaveasfilename(
             title="Save stego video as",
-            defaultextension=".avi",
-            filetypes=[("AVI video", "*.avi")])
+            defaultextension=default_ext,
+            filetypes=filetypes)
         if not output_path:
             return
 
@@ -399,7 +433,11 @@ class StegoApp:
                       use_encrypt, a51_key, use_random, stego_key,
                       output_path):
         try:
-            result = embed_message(
+            # Select appropriate embed function based on output format
+            output_format = get_format(output_path).lower()
+            embed_func = embed_mp4 if output_format == "mp4" else embed_avi
+            
+            result = embed_func(
                 cover_path     = self.video_path,
                 output_path    = output_path,
                 message        = msg,
@@ -427,19 +465,32 @@ class StegoApp:
 
     def _embed_done(self, result, cover_frames, stego_frames, key_path):
         self.embed_btn.config(state="normal", text="🔒  Embed Message")
-        self.embed_status.config(text="✅  Embedding complete!", fg=SUCCESS)
-
+        
         cap_kb = result["total_capacity_bytes"] // 1024
+        fmt_str = result.get("format", "AVI")  # Get format from result
+        
         self.metrics_label.config(
-            text=(f"MSE: {result['mse_avg']:.4f}  |  "
+            text=(f"Format: {fmt_str}  |  MSE: {result['mse_avg']:.4f}  |  "
                   f"PSNR: {result['psnr_avg']:.2f} dB  |  "
                   f"Capacity: {cap_kb} KB"),
             fg=SUCCESS
         )
 
         if key_path:
-            self.key_saved_label.config(
-                text=f"🔑  Keys saved → {key_path}", fg=WARNING)
+            # Show file path prominently
+            key_display = f"🔑  Keys saved to: {os.path.basename(key_path)}"
+            self.key_saved_label.config(text=key_display, fg=SUCCESS)
+            self.embed_status.config(
+                text=f"✅  Embedding complete!  (Keys: {os.path.basename(key_path)})", 
+                fg=SUCCESS
+            )
+            # Also show full path in a messagebox
+            full_path = os.path.abspath(key_path)
+            messagebox.showinfo("Keys Saved", 
+                f"Encryption & steganography keys saved to:\n\n{full_path}\n\n"
+                "Keep this file safe! You need it to extract the message.")
+        else:
+            self.embed_status.config(text="✅  Embedding complete!", fg=SUCCESS)
 
         self._show_histogram(cover_frames, stego_frames, result["mse_list"])
 
@@ -529,7 +580,12 @@ class StegoApp:
 
         self.stego_lbl = _make_label(left, "No file selected",
                                      fg=MUTED, font=("Segoe UI", 8), bg=PANEL)
-        self.stego_lbl.grid(row=2, column=0, sticky="w", pady=(2, 14))
+        self.stego_lbl.grid(row=2, column=0, sticky="w", pady=(2, 0))
+
+        self.stego_format_lbl = _make_label(left, "",
+                                            fg=SUCCESS, bg=PANEL,
+                                            font=("Segoe UI", 7))
+        self.stego_format_lbl.grid(row=2, column=0, sticky="e", pady=(2, 0))
 
         _make_label(left, "A5/1 KEY", fg=ACCENT,
                     font=("Segoe UI", 8, "bold"), bg=PANEL).grid(
@@ -593,10 +649,15 @@ class StegoApp:
     def _select_stego(self):
         path = filedialog.askopenfilename(
             title="Select Stego Video",
-            filetypes=[("Video files", "*.avi *.mp4")])
+            filetypes=[("Video files", "*.avi *.mp4"),
+                      ("AVI video", "*.avi"),
+                      ("MP4 video", "*.mp4"),
+                      ("All files", "*.*")])
         if path:
             self.stego_path = path
+            stego_format = get_format(path).upper()
             self.stego_lbl.config(text=os.path.basename(path), fg=TEXT)
+            self.stego_format_lbl.config(text=f"[{stego_format}]", fg=SUCCESS)
 
     def _set_output_text(self, text, color=SUCCESS):
         self.output_text.config(state="normal")
@@ -641,7 +702,11 @@ class StegoApp:
 
     def _extract_worker(self, stego_path, a51_key, stego_key):
         try:
-            result = extract_message(stego_path, a51_key, stego_key)
+            # Select appropriate extract function based on stego video format
+            stego_format = get_format(stego_path).lower()
+            extract_func = extract_mp4 if stego_format == "mp4" else extract_avi
+            
+            result = extract_func(stego_path, a51_key, stego_key)
             self.root.after(0, self._extract_done, result, stego_path)
         except Exception as exc:
             self.root.after(0, self._extract_error, str(exc))
@@ -661,6 +726,7 @@ class StegoApp:
 
             display = (
                 f"{'─'*60}\n"
+                f"  Format    : {result.get('format', 'UNKNOWN')}\n"
                 f"  Mode      : {'Random' if result['is_random'] else 'Sequential'}\n"
                 f"  Encrypted : {'Yes' if result['is_encrypted'] else 'No'}\n"
                 f"  Size      : {result['payload_size']} bytes\n"
