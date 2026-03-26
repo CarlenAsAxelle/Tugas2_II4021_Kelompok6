@@ -12,20 +12,33 @@ from src.stego_lsb import (
 )
 from src.a51_cipher import a51_encrypt_payload, a51_decrypt_payload
 
-HEADER_SIZE = 32  # bytes
+HEADER_SIZE = 64  # bytes (expanded from 32 to fit longer filenames)
+# Header layout (64 bytes):
+#   [0]      is_text
+#   [1]      is_encrypted
+#   [2]      is_random
+#   [3]      ext_len  (max 10)
+#   [4:14]   extension (10 bytes)
+#   [14]     fname_len (max 50)
+#   [15:65]  filename -- BUT we only have 64 bytes total, so bytes [15:63] = 48 bytes for name
+#            (fname stored in [15:63], max 48 chars; fname_len stored in [14])
+#   [60:64]  payload_size (4 bytes big-endian)
+
+_FNAME_MAX = 45   # bytes reserved for filename (bytes 15..59)
+_EXT_MAX   = 10   # bytes reserved for extension (bytes 4..13)
 
 def encode_header(is_text, is_encrypted, is_random, extension, filename, payload_size):
     header = bytearray(HEADER_SIZE)
     header[0] = 1 if is_text else 0
     header[1] = 1 if is_encrypted else 0
     header[2] = 1 if is_random else 0
-    ext_bytes = extension.encode('utf-8')[:10]
+    ext_bytes = extension.encode('utf-8')[:_EXT_MAX]
     header[3] = len(ext_bytes)
     header[4:4 + len(ext_bytes)] = ext_bytes
-    fname_bytes = filename.encode('utf-8')[:10]
+    fname_bytes = filename.encode('utf-8')[:_FNAME_MAX]
     header[14] = len(fname_bytes)
     header[15:15 + len(fname_bytes)] = fname_bytes
-    header[28:32] = payload_size.to_bytes(4, 'big')
+    header[60:64] = payload_size.to_bytes(4, 'big')
     return bytes(header)
 
 def decode_header(header):
@@ -33,10 +46,10 @@ def decode_header(header):
     is_encrypted = bool(header[1])
     is_random    = bool(header[2])
     ext_len      = header[3]
-    extension    = header[4:4 + ext_len].decode('utf-8', errors='replace')
+    extension    = header[4:4 + min(ext_len, _EXT_MAX)].decode('utf-8', errors='replace')
     fname_len    = header[14]
-    filename     = header[15:15 + fname_len].decode('utf-8', errors='replace')
-    payload_size = int.from_bytes(header[28:32], 'big')
+    filename     = header[15:15 + min(fname_len, _FNAME_MAX)].decode('utf-8', errors='replace')
+    payload_size = int.from_bytes(header[60:64], 'big')
     return dict(is_text=is_text, is_encrypted=is_encrypted, is_random=is_random,
                 extension=extension, filename=filename, payload_size=payload_size)
 
