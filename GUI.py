@@ -76,13 +76,7 @@ class StegoApp:
         self._embed_file_path  = None
         self._embed_file_bytes = 0
 
-        self.cmp_cover_frames = []
-        self.cmp_stego_frames = []
-        self.cmp_cover_path   = None
-        self.cmp_stego_path   = None
-        self.cmp_idx          = 0
-        self.cmp_mse_list     = []
-        self.cmp_psnr_list    = []
+
 
         self._apply_style()
         self._setup_ui()
@@ -104,13 +98,10 @@ class StegoApp:
         self.notebook.pack(fill="both", expand=True, padx=6, pady=6)
         self.embed_tab   = tk.Frame(self.notebook, bg=BG)
         self.extract_tab = tk.Frame(self.notebook, bg=BG)
-        self.compare_tab = tk.Frame(self.notebook, bg=BG)
         self.notebook.add(self.embed_tab,   text="  📥  Embed  ")
         self.notebook.add(self.extract_tab, text="  📤  Extract  ")
-        self.notebook.add(self.compare_tab, text="  🔍  Compare  ")
         self._build_embed_ui()
         self._build_extract_ui()
-        self._build_compare_ui()
 
     # ══════════════════════════════════════════════════════════════════════════
     #  EMBED TAB
@@ -661,173 +652,7 @@ class StegoApp:
         self.extract_status.config(text=f"❌  {msg}", fg=DANGER)
         self._set_output_text(f"❌  EXTRACTION FAILED\n\n{msg}", DANGER)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    #  COMPARE TAB
-    # ══════════════════════════════════════════════════════════════════════════
-    def _build_compare_ui(self):
-        root = self.compare_tab
-        root.columnconfigure(0, weight=1)
-        root.columnconfigure(1, weight=1)
-        root.rowconfigure(4, weight=1)
 
-        top = tk.Frame(root, bg=PANEL, padx=10, pady=8)
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(6,2))
-        _make_btn(top, "📂  Load Cover Video", self._load_compare_cover, bg=CARD).pack(side="left", padx=4)
-        self.cmp_cover_lbl = _make_label(top, "No cover loaded", fg=MUTED, bg=PANEL, font=("Segoe UI",8))
-        self.cmp_cover_lbl.pack(side="left", padx=6)
-        _make_btn(top, "📂  Load Stego Video", self._load_compare_stego, bg=CARD).pack(side="left", padx=(20,4))
-        self.cmp_stego_lbl = _make_label(top, "No stego loaded", fg=MUTED, bg=PANEL, font=("Segoe UI",8))
-        self.cmp_stego_lbl.pack(side="left", padx=6)
-        self.cmp_calc_btn = _make_btn(top, "📊  Calculate MSE & PSNR", self._run_compare, bg=ACCENT, fg="white", font=("Segoe UI",9,"bold"))
-        self.cmp_calc_btn.pack(side="right", padx=4)
-
-        for col, (ta, ca, label) in enumerate([
-            ("_cmp_cover_title","cmp_cover_canvas","COVER VIDEO"),
-            ("_cmp_stego_title","cmp_stego_canvas","STEGO VIDEO")]):
-            panel = tk.Frame(root, bg=PANEL)
-            panel.grid(row=1, column=col, sticky="nsew",
-                       padx=(6 if col==0 else 3, 3 if col==0 else 6), pady=2)
-            panel.columnconfigure(0, weight=1)
-            lbl = _make_label(panel, label, fg=ACCENT, font=("Segoe UI",8,"bold"), bg=PANEL)
-            lbl.grid(row=0, column=0, pady=(6,2)); setattr(self, ta, lbl)
-            canvas = tk.Label(panel, bg="#000", width=DISPLAY_W, height=DISPLAY_H)
-            canvas.grid(row=1, column=0, padx=8, pady=4); setattr(self, ca, canvas)
-
-        slider_row = tk.Frame(root, bg=BG, pady=4)
-        slider_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10)
-        slider_row.columnconfigure(1, weight=1)
-        _make_label(slider_row, "Frame:", fg=TEXT, bg=BG).grid(row=0, column=0, padx=(0,6))
-        self.cmp_slider = ttk.Scale(slider_row, from_=0, to=0, orient="horizontal", command=self._compare_scrub)
-        self.cmp_slider.grid(row=0, column=1, sticky="ew")
-        self.cmp_frame_lbl = _make_label(slider_row, "0 / 0", fg=TEXT, bg=BG, font=("Segoe UI",8))
-        self.cmp_frame_lbl.grid(row=0, column=2, padx=(6,0))
-
-        stats = tk.Frame(root, bg=CARD, pady=6)
-        stats.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=2)
-        stats.columnconfigure(0, weight=1)
-        self.cmp_stats_lbl = _make_label(stats, "Load both videos, then click  📊 Calculate MSE & PSNR",
-                                         fg=MUTED, font=("Consolas",10), bg=CARD)
-        self.cmp_stats_lbl.grid(row=0, column=0, pady=4)
-
-        self.cmp_chart_frame = tk.Frame(root, bg=BG)
-        self.cmp_chart_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=(2,6))
-
-    def _load_compare_cover(self):
-        path = filedialog.askopenfilename(title="Select Cover Video", filetypes=[("Video files","*.avi *.mp4")])
-        if not path: return
-        self.cmp_cover_path = path
-        self.cmp_cover_lbl.config(text=os.path.basename(path), fg=TEXT)
-        self.cmp_calc_btn.config(state="disabled", text="⏳  Loading…")
-        threading.Thread(target=self._load_cmp_cover_worker, args=(path,), daemon=True).start()
-
-    def _load_cmp_cover_worker(self, path):
-        frames, _ = read_video_frames(path); self.cmp_cover_frames = frames
-        self.root.after(0, self._cmp_after_load)
-
-    def _load_compare_stego(self):
-        path = filedialog.askopenfilename(title="Select Stego Video", filetypes=[("Video files","*.avi *.mp4")])
-        if not path: return
-        self.cmp_stego_path = path
-        self.cmp_stego_lbl.config(text=os.path.basename(path), fg=TEXT)
-        self.cmp_calc_btn.config(state="disabled", text="⏳  Loading…")
-        threading.Thread(target=self._load_cmp_stego_worker, args=(path,), daemon=True).start()
-
-    def _load_cmp_stego_worker(self, path):
-        frames, _ = read_video_frames(path); self.cmp_stego_frames = frames
-        self.root.after(0, self._cmp_after_load)
-
-    def _cmp_after_load(self):
-        self.cmp_calc_btn.config(state="normal", text="📊  Calculate MSE & PSNR")
-        n = min(len(self.cmp_cover_frames), len(self.cmp_stego_frames))
-        if n > 0:
-            self.cmp_slider.config(to=max(0, n-1))
-            self.cmp_idx = 0; self._show_cmp_frame(0)
-
-    def _compare_scrub(self, val):
-        idx = int(float(val)); self.cmp_idx = idx; self._show_cmp_frame(idx)
-
-    def _show_cmp_frame(self, idx):
-        n_c = len(self.cmp_cover_frames); n_s = len(self.cmp_stego_frames)
-        total = min(n_c, n_s)
-        if n_c > 0 and idx < n_c:
-            img = _resize_for_display(self.cmp_cover_frames[idx])
-            self.cmp_cover_canvas.configure(image=img); self.cmp_cover_canvas.image = img
-        if n_s > 0 and idx < n_s:
-            img = _resize_for_display(self.cmp_stego_frames[idx])
-            self.cmp_stego_canvas.configure(image=img); self.cmp_stego_canvas.image = img
-        psnr_str = ""
-        if self.cmp_psnr_list and idx < len(self.cmp_psnr_list):
-            psnr_str = f"   MSE={self.cmp_mse_list[idx]:.4f}  PSNR={self.cmp_psnr_list[idx]:.2f} dB"
-        self.cmp_frame_lbl.config(text=f"Frame {idx} / {total-1 if total>0 else 0}{psnr_str}")
-
-    def _run_compare(self):
-        if not self.cmp_cover_frames or not self.cmp_stego_frames:
-            messagebox.showerror("Error", "Load both a cover and a stego video first."); return
-        n_c = len(self.cmp_cover_frames); n_s = len(self.cmp_stego_frames)
-        if n_c != n_s:
-            if not messagebox.askyesno("Frame count mismatch",
-                f"Cover: {n_c} frames, Stego: {n_s} frames.\nCompare using the shorter length?"): return
-        self.cmp_calc_btn.config(state="disabled", text="⏳  Calculating…")
-        self.cmp_stats_lbl.config(text="Calculating… please wait.", fg=WARNING)
-        threading.Thread(target=self._compare_worker, daemon=True).start()
-
-    def _compare_worker(self):
-        try:
-            n = min(len(self.cmp_cover_frames), len(self.cmp_stego_frames))
-            mse_list, psnr_list, mse_avg, psnr_avg = mse_psnr_video(
-                self.cmp_cover_frames[:n], self.cmp_stego_frames[:n])
-            self.root.after(0, self._compare_done, mse_list, psnr_list, mse_avg, psnr_avg)
-        except Exception as exc:
-            self.root.after(0, self._compare_error, str(exc))
-
-    def _compare_done(self, mse_list, psnr_list, mse_avg, psnr_avg):
-        self.cmp_mse_list = mse_list; self.cmp_psnr_list = psnr_list
-        self.cmp_calc_btn.config(state="normal", text="📊  Calculate MSE & PSNR")
-        finite = [p for p in psnr_list if np.isfinite(p)]
-        self.cmp_stats_lbl.config(
-            text=(f"MSE avg: {mse_avg:.4f}   |   PSNR avg: {psnr_avg:.2f} dB   |   "
-                  f"PSNR min: {min(finite):.2f} dB   |   PSNR max: {max(finite):.2f} dB   |   "
-                  f"Frames: {len(mse_list)}"),
-            fg=SUCCESS)
-        self._show_cmp_frame(self.cmp_idx)
-        self._draw_compare_chart(mse_list, psnr_list)
-
-    def _compare_error(self, msg):
-        self.cmp_calc_btn.config(state="normal", text="📊  Calculate MSE & PSNR")
-        self.cmp_stats_lbl.config(text=f"❌  {msg}", fg=DANGER)
-        messagebox.showerror("Compare Error", msg)
-
-    def _draw_compare_chart(self, mse_list, psnr_list):
-        plt.style.use("dark_background")
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 2.6), facecolor=BG)
-        frames = list(range(len(mse_list)))
-        ax1.fill_between(frames, mse_list, alpha=0.3, color=ACCENT)
-        ax1.plot(frames, mse_list, color=ACCENT, linewidth=1)
-        ax1.axhline(np.mean(mse_list), color=WARNING, linewidth=1, linestyle="--",
-                    label=f"avg={np.mean(mse_list):.4f}")
-        ax1.set_title("MSE per Frame", color=TEXT, fontsize=9)
-        ax1.set_xlabel("Frame", color=MUTED, fontsize=7)
-        ax1.set_facecolor(PANEL); ax1.tick_params(colors=MUTED, labelsize=6)
-        ax1.legend(fontsize=7, facecolor=CARD, labelcolor=TEXT)
-        for sp in ax1.spines.values(): sp.set_edgecolor(CARD)
-        finite = [p for p in psnr_list if np.isfinite(p)]
-        p_cap  = (max(finite)+5) if finite else 60
-        clipped= [min(p,p_cap) for p in psnr_list]
-        ax2.fill_between(frames, clipped, alpha=0.3, color=SUCCESS)
-        ax2.plot(frames, clipped, color=SUCCESS, linewidth=1)
-        if finite:
-            ax2.axhline(np.mean(finite), color=WARNING, linewidth=1, linestyle="--",
-                        label=f"avg={np.mean(finite):.2f} dB")
-        ax2.set_title("PSNR per Frame (dB)", color=TEXT, fontsize=9)
-        ax2.set_xlabel("Frame", color=MUTED, fontsize=7)
-        ax2.set_facecolor(PANEL); ax2.tick_params(colors=MUTED, labelsize=6)
-        ax2.legend(fontsize=7, facecolor=CARD, labelcolor=TEXT)
-        for sp in ax2.spines.values(): sp.set_edgecolor(CARD)
-        fig.tight_layout(pad=1.5)
-        for w in self.cmp_chart_frame.winfo_children(): w.destroy()
-        canvas = FigureCanvasTkAgg(fig, master=self.cmp_chart_frame)
-        canvas.draw(); canvas.get_tk_widget().pack(fill="both", expand=True)
-        plt.close(fig)
 
 
 if __name__ == "__main__":
