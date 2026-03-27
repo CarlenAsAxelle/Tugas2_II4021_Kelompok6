@@ -16,8 +16,25 @@ from src.a51_cipher import a51_encrypt_payload, a51_decrypt_payload
 
 
 # ─── METADATA HEADER ──────────────────────────────────────────────────────────
-HEADER_SIZE    = 32   # bytes
+HEADER_SIZE    = 64   # bytes (matches AVI header size)
 HEADER_BITS    = HEADER_SIZE * 8
+
+# Header layout (64 bytes):
+#   [0]      is_text
+#   [1]      is_encrypted
+#   [2]      is_random
+#   [3]      ext_len  (max 10)
+#   [4:14]   extension (10 bytes)
+#   [14]     fname_len (max 40)
+#   [15:55]  filename (40 bytes)
+#   [55]     lsb_method (0=3-3-2, 1=1-1-1, 2=4-4-4)
+#   [56:58]  num_frames (2 bytes big-endian)
+#   [58]     format_flag (0=AVI, 1=MP4)
+#   [59]     reserved
+#   [60:64]  payload_size (4 bytes big-endian)
+
+_FNAME_MAX = 40
+_EXT_MAX   = 10
 
 FORMAT_FLAG_AVI = 0
 FORMAT_FLAG_MP4 = 1
@@ -32,23 +49,23 @@ def encode_header(is_text: bool, is_encrypted: bool, is_random: bool,
     header[1] = 1 if is_encrypted else 0
     header[2] = 1 if is_random else 0
 
-    ext_bytes = extension.encode('utf-8')[:10]
+    ext_bytes = extension.encode('utf-8')[:_EXT_MAX]
     header[3] = len(ext_bytes)
     header[4:4 + len(ext_bytes)] = ext_bytes
 
-    fname_bytes = filename.encode('utf-8')[:10]
+    fname_bytes = filename.encode('utf-8')[:_FNAME_MAX]
     header[14] = len(fname_bytes)
     header[15:15 + len(fname_bytes)] = fname_bytes
-    
-    header[24] = lsb_method & 0xFF
-    
-    # Simpan jumlah frame (max 65535) di reserved bytes
+
+    header[55] = lsb_method & 0xFF
+
+    # Simpan jumlah frame (max 65535)
     if num_frames > 65535:
         print("Warning: num_frames > 65535, header truncation may break random shuffle sync.")
-    header[25:27] = (num_frames & 0xFFFF).to_bytes(2, 'big')
+    header[56:58] = (num_frames & 0xFFFF).to_bytes(2, 'big')
 
-    header[27] = FORMAT_FLAG_MP4 if is_mp4 else FORMAT_FLAG_AVI
-    header[28:32] = payload_size.to_bytes(4, 'big')
+    header[58] = FORMAT_FLAG_MP4 if is_mp4 else FORMAT_FLAG_AVI
+    header[60:64] = payload_size.to_bytes(4, 'big')
     return bytes(header)
 
 
@@ -57,17 +74,17 @@ def decode_header(header: bytes) -> dict:
     is_encrypted = bool(header[1])
     is_random    = bool(header[2])
 
-    ext_len   = header[3]
+    ext_len   = min(header[3], _EXT_MAX)
     extension = header[4:4 + ext_len].decode('utf-8', errors='replace')
 
-    fname_len = header[14]
+    fname_len = min(header[14], _FNAME_MAX)
     filename  = header[15:15 + fname_len].decode('utf-8', errors='replace')
 
-    lsb_method   = header[24]
-    num_frames   = int.from_bytes(header[25:27], 'big')
-    format_flag  = header[27]
+    lsb_method   = header[55]
+    num_frames   = int.from_bytes(header[56:58], 'big')
+    format_flag  = header[58]
     is_mp4       = (format_flag == FORMAT_FLAG_MP4)
-    payload_size = int.from_bytes(header[28:32], 'big')
+    payload_size = int.from_bytes(header[60:64], 'big')
 
     return {
         "is_text":      is_text,
@@ -273,7 +290,7 @@ def _embed_header_sequential(frames: list, header: bytes) -> tuple:
 def _extract_header_sequential(frames: list) -> tuple:
     h, w, _ = frames[0].shape
     pixels_per_frame = h * w
-    pixels_needed = 32  # 32 bytes * 8 bits / 8 bpp = 32 pixels
+    pixels_needed = HEADER_SIZE  # HEADER_SIZE bytes * 8 bits / 8 bpp = HEADER_SIZE pixels
 
     bits = []
     for pix_num in range(pixels_needed):

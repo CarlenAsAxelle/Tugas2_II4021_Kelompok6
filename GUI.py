@@ -309,7 +309,7 @@ class StegoApp:
     # ── capacity bar ─────────────────────────────────────────────────────────
     def _update_capacity_ui(self, msg_size_bytes=0):
         cap    = self._capacity_bytes
-        HEADER = 32
+        HEADER = 64
         if cap == 0:
             self.cap_total_lbl.config(text="Load a video first", fg=MUTED)
             self.cap_used_lbl.config(text="")
@@ -459,7 +459,7 @@ class StegoApp:
             messagebox.showerror("Error", "Enter a text message or select a file to embed."); return
 
         # ── Capacity pre-check (BEFORE spawning thread) ───────────────────────
-        HEADER   = 32
+        HEADER   = 64
         needed   = HEADER + len(msg)
         capacity = self._capacity_bytes
         if capacity > 0 and needed > capacity:
