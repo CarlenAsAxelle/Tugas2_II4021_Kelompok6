@@ -1,19 +1,7 @@
-# src/stego_lsb.py
+# src/stego_lsb_332.py
+# 3-3-2 LSB steganography: 3 bits in R, 3 bits in G, 2 bits in B = 8 bits/pixel.
 import numpy as np
-from typing import Iterable, Tuple
-
-
-def bytes_to_bits(data: bytes) -> np.ndarray:
-    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
-    return bits.astype(np.uint8)
-
-
-def bits_to_bytes(bits: Iterable[int]) -> bytes:
-    bits = np.array(bits, dtype=np.uint8)
-    if bits.size % 8 != 0:
-        pad_len = 8 - (bits.size % 8)
-        bits = np.concatenate([bits, np.zeros(pad_len, dtype=np.uint8)])
-    return np.packbits(bits).tobytes()
+from src.stego_lsb_utils import pixel_indices_random
 
 
 def capacity_332(frame: np.ndarray) -> int:
@@ -117,16 +105,6 @@ def extract_bits_sequential_332(frame: np.ndarray, num_bits: int) -> np.ndarray:
 
 
 # ─── PUBLIC: RANDOM ───────────────────────────────────────────────────────────
-
-def pixel_indices_random(h: int, w: int, seed: int) -> np.ndarray:
-    """
-    Generate urutan indeks piksel acak (flattened index) untuk mode acak.
-    """
-    rng = np.random.default_rng(seed)
-    idx = np.arange(h * w)
-    rng.shuffle(idx)
-    return idx
-
 
 def embed_bits_random_332(frame: np.ndarray, bits: np.ndarray, seed: int) -> np.ndarray:
     h, w, _ = frame.shape

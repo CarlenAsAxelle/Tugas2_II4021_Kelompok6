@@ -7,11 +7,10 @@ from src.video_io_mp4 import (
     read_video_frames, write_video_frames,
     mse_psnr_video
 )
-from src.stego_lsb import (
+from src.stego_lsb_utils import (
     bytes_to_bits, bits_to_bytes,
-    capacity_332,
-    embed_bits_sequential_332, extract_bits_sequential_332,
-    embed_bits_random_332, extract_bits_random_332
+    get_lsb_functions, get_capacity_fn, get_bits_per_pixel,
+    LSB_METHOD_332, LSB_METHOD_111, LSB_METHOD_444, LSB_METHOD_LABELS
 )
 from src.a51_cipher import a51_encrypt_payload, a51_decrypt_payload
 
@@ -26,7 +25,8 @@ FORMAT_FLAG_MP4 = 1
 
 def encode_header(is_text: bool, is_encrypted: bool, is_random: bool,
                   extension: str, filename: str, payload_size: int,
-                  is_mp4: bool = False, num_frames: int = 0) -> bytes:
+                  is_mp4: bool = False, num_frames: int = 0,
+                  lsb_method: int = LSB_METHOD_332) -> bytes:
     header = bytearray(HEADER_SIZE)
     header[0] = 1 if is_text else 0
     header[1] = 1 if is_encrypted else 0
@@ -40,10 +40,11 @@ def encode_header(is_text: bool, is_encrypted: bool, is_random: bool,
     header[14] = len(fname_bytes)
     header[15:15 + len(fname_bytes)] = fname_bytes
     
-    # FIX: Simpan jumlah frame (max 65535) di reserved bytes
-    # Ini penting untuk sinkronisasi RNG pada mode MP4
+    header[24] = lsb_method & 0xFF
+    
+    # Simpan jumlah frame (max 65535) di reserved bytes
     if num_frames > 65535:
-        print("Warning: num_frames > 65535, header trunction may break random shuffle sync.")
+        print("Warning: num_frames > 65535, header truncation may break random shuffle sync.")
     header[25:27] = (num_frames & 0xFFFF).to_bytes(2, 'big')
 
     header[27] = FORMAT_FLAG_MP4 if is_mp4 else FORMAT_FLAG_AVI
@@ -62,6 +63,7 @@ def decode_header(header: bytes) -> dict:
     fname_len = header[14]
     filename  = header[15:15 + fname_len].decode('utf-8', errors='replace')
 
+    lsb_method   = header[24]
     num_frames   = int.from_bytes(header[25:27], 'big')
     format_flag  = header[27]
     is_mp4       = (format_flag == FORMAT_FLAG_MP4)
@@ -75,28 +77,20 @@ def decode_header(header: bytes) -> dict:
         "filename":     filename,
         "is_mp4":       is_mp4,
         "payload_size": payload_size,
-        "num_frames":   num_frames
+        "num_frames":   num_frames,
+        "lsb_method":   lsb_method,
     }
 
 
 # ─── CAPACITY ─────────────────────────────────────────────────────────────────
 
-def total_capacity_bytes(frames: list) -> int:
-    total_bits = sum(capacity_332(f) for f in frames)
+def total_capacity_bytes(frames: list, lsb_method: int = LSB_METHOD_332) -> int:
+    cap_fn = get_capacity_fn(lsb_method)
+    total_bits = sum(cap_fn(f) for f in frames)
     return total_bits // 8
 
 
 def _calculate_embedded_frame_count(total_bits: int, frame_capacity_bits: int) -> int:
-    """
-    Calculate how many frames starting from frame 0 will contain embedded data.
-    
-    Args:
-        total_bits: Total bits to embed (header + payload)
-        frame_capacity_bits: Bits per frame capacity
-    
-    Returns:
-        Number of frames needed to hold all embedded bits
-    """
     if total_bits == 0:
         return 0
     return (total_bits + frame_capacity_bits - 1) // frame_capacity_bits
@@ -106,12 +100,14 @@ def _calculate_embedded_frame_count(total_bits: int, frame_capacity_bits: int) -
 
 def _embed_bits_with_pixel_offset(frames: list, bits: np.ndarray,
                                    pixel_offset: int,
-                                   is_random: bool, seed: int) -> list:
+                                   is_random: bool, seed: int,
+                                   lsb_method: int = LSB_METHOD_332) -> list:
     """
     Embed bits ke frames mulai dari pixel_offset (dalam satuan piksel),
     melewati piksel-piksel yang sudah dipakai header.
     """
     result_frames = [f.copy() for f in frames]
+    bpp = get_bits_per_pixel(lsb_method)
 
     h, w, _ = frames[0].shape
     pixels_per_frame = h * w
@@ -119,15 +115,23 @@ def _embed_bits_with_pixel_offset(frames: list, bits: np.ndarray,
     available_pixel_indices = np.arange(pixel_offset, total_pixels)
 
     if is_random:
-        # PENTING: Seed RNG harus konsisten. 
         rng = np.random.default_rng(seed)
         rng.shuffle(available_pixel_indices)
 
-    pixels_needed = int(np.ceil(bits.size / 8))
+    pixels_needed = int(np.ceil(bits.size / bpp))
     if pixels_needed > len(available_pixel_indices):
         raise ValueError("Payload terlalu besar untuk kapasitas yang tersisa")
 
     bit_idx = 0
+    
+    # Determine bit masks based on method
+    if lsb_method == LSB_METHOD_111:
+        r_bits, g_bits, b_bits = 1, 1, 1
+    elif lsb_method == LSB_METHOD_444:
+        r_bits, g_bits, b_bits = 4, 4, 4
+    else:  # 332
+        r_bits, g_bits, b_bits = 3, 3, 2
+
     for pix_num in available_pixel_indices[:pixels_needed]:
         frame_idx = pix_num // pixels_per_frame
         local_pix = pix_num % pixels_per_frame
@@ -136,16 +140,18 @@ def _embed_bits_with_pixel_offset(frames: list, bits: np.ndarray,
         frame = result_frames[frame_idx]
         r, g, b = int(frame[i, j, 0]), int(frame[i, j, 1]), int(frame[i, j, 2])
 
-        # Embed 3-3-2
-        for k in range(3):
+        # Embed into R channel
+        for k in range(r_bits):
             if bit_idx < bits.size:
                 r = (r & ~(1 << k)) | (int(bits[bit_idx]) << k)
                 bit_idx += 1
-        for k in range(3):
+        # Embed into G channel
+        for k in range(g_bits):
             if bit_idx < bits.size:
                 g = (g & ~(1 << k)) | (int(bits[bit_idx]) << k)
                 bit_idx += 1
-        for k in range(2):
+        # Embed into B channel
+        for k in range(b_bits):
             if bit_idx < bits.size:
                 b = (b & ~(1 << k)) | (int(bits[bit_idx]) << k)
                 bit_idx += 1
@@ -161,16 +167,16 @@ def _embed_bits_with_pixel_offset(frames: list, bits: np.ndarray,
 def _extract_bits_with_pixel_offset(frames: list, num_bits: int,
                                      pixel_offset: int,
                                      is_random: bool, seed: int,
-                                     original_num_frames: int = 0) -> np.ndarray:
+                                     original_num_frames: int = 0,
+                                     lsb_method: int = LSB_METHOD_332) -> np.ndarray:
     """
     Ekstrak bits dari frames.
     """
+    bpp = get_bits_per_pixel(lsb_method)
     h, w, _ = frames[0].shape
     pixels_per_frame = h * w
     current_num_frames = len(frames)
 
-    # Validasi frame count agar tidak crash memory
-    # Jika original_num_frames sangat besar (> 2x current), anggap header corrupt
     if original_num_frames > current_num_frames * 2:
         print(f"⚠️ Warning: Header num_frames ({original_num_frames}) > 2x actual ({current_num_frames}). Ignoring header value.")
         calc_num_frames = current_num_frames
@@ -179,16 +185,10 @@ def _extract_bits_with_pixel_offset(frames: list, num_bits: int,
     
     total_pixels_calc = calc_num_frames * pixels_per_frame
     
-    # ─── MEMORY SAFETY GUARD ───────────────────────────────────────────────
-    # Jika total pixels masih terlalu besar, batasi.
-    # Misalnya max 2 GB buffer index (250 juta pixel * 8 byte).
-    # 250M pixel ~ 120 frames FHD. Jika video lebih panjang, kita butuh strategi lain.
-    # Tapi untuk assignment ini asumsi video pendek.
-    if total_pixels_calc > 500_000_000: # hard limit ~500M pixels (~4GB RAM usage for index array)
+    if total_pixels_calc > 500_000_000:
         print(f"⚠️ Warning: Total pixels {total_pixels_calc} too large for safe shuffle. Clamping to actual.")
         calc_num_frames = current_num_frames
         total_pixels_calc = calc_num_frames * pixels_per_frame
-    # ───────────────────────────────────────────────────────────────────────
 
     available_pixel_indices = np.arange(pixel_offset, total_pixels_calc)
 
@@ -196,8 +196,15 @@ def _extract_bits_with_pixel_offset(frames: list, num_bits: int,
         rng = np.random.default_rng(seed)
         rng.shuffle(available_pixel_indices)
 
+    # Determine bit extraction pattern based on method
+    if lsb_method == LSB_METHOD_111:
+        r_bits, g_bits, b_bits = 1, 1, 1
+    elif lsb_method == LSB_METHOD_444:
+        r_bits, g_bits, b_bits = 4, 4, 4
+    else:  # 332
+        r_bits, g_bits, b_bits = 3, 3, 2
+
     bits = []
-    # Loop hanya sebanyak bit yang dibutuhkan
     for pix_num in available_pixel_indices:
         if len(bits) >= num_bits:
             break
@@ -205,7 +212,7 @@ def _extract_bits_with_pixel_offset(frames: list, num_bits: int,
         frame_idx = pix_num // pixels_per_frame
         
         if frame_idx >= current_num_frames:
-            bits.extend([0]*8) # Frame hilang/dropped
+            bits.extend([0] * bpp)
             continue
             
         local_pix = pix_num % pixels_per_frame
@@ -214,21 +221,23 @@ def _extract_bits_with_pixel_offset(frames: list, num_bits: int,
         frame = frames[frame_idx]
         r, g, b = int(frame[i, j, 0]), int(frame[i, j, 1]), int(frame[i, j, 2])
 
-        for k in range(3):
+        for k in range(r_bits):
             bits.append((r >> k) & 1)
-        for k in range(3):
+        for k in range(g_bits):
             bits.append((g >> k) & 1)
-        for k in range(2):
+        for k in range(b_bits):
             bits.append((b >> k) & 1)
 
     return np.array(bits[:num_bits], dtype=np.uint8)
 
 
 # ─── HEADER EMBED/EXTRACT (selalu sekuensial, mulai pixel 0) ──────────────────
+# NOTE: Header always uses 3-3-2 method for consistency —
+# this way we can always read the header to discover the payload's method.
 
 def _embed_header_sequential(frames: list, header: bytes) -> tuple:
     header_bits = bytes_to_bits(header)
-    pixels_needed = int(np.ceil(HEADER_BITS / 8))
+    pixels_needed = int(np.ceil(HEADER_BITS / 8))  # 8 bits per pixel for 3-3-2
     
     h, w, _ = frames[0].shape
     pixels_per_frame = h * w
@@ -264,7 +273,7 @@ def _embed_header_sequential(frames: list, header: bytes) -> tuple:
 def _extract_header_sequential(frames: list) -> tuple:
     h, w, _ = frames[0].shape
     pixels_per_frame = h * w
-    pixels_needed = 32
+    pixels_needed = 32  # 32 bytes * 8 bits / 8 bpp = 32 pixels
 
     bits = []
     for pix_num in range(pixels_needed):
@@ -292,7 +301,8 @@ def _extract_header_sequential(frames: list) -> tuple:
 def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bool,
                   extension: str = "", filename: str = "", use_encryption: bool = False,
                   a51_key: Optional[int] = None, use_random: bool = False,
-                  stego_key: Optional[int] = None, mp4_crf: int = 0) -> dict:
+                  stego_key: Optional[int] = None, mp4_crf: int = 0,
+                  lsb_method: int = LSB_METHOD_332) -> dict:
 
     frames, fps = read_video_frames(cover_path)
 
@@ -302,7 +312,7 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
         payload = a51_encrypt_payload(message, a51_key)
 
     seed = stego_key if stego_key is not None else 0
-    total_cap = total_capacity_bytes(frames)
+    total_cap = total_capacity_bytes(frames, lsb_method)
     needed = HEADER_SIZE + len(payload)
     if needed > total_cap:
         raise ValueError(f"Payload too large: {needed} > {total_cap}")
@@ -310,19 +320,20 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
     header = encode_header(
         is_text=is_text, is_encrypted=use_encryption, is_random=use_random,
         extension=extension, filename=filename, payload_size=len(payload),
-        is_mp4=True, num_frames=len(frames)
+        is_mp4=True, num_frames=len(frames), lsb_method=lsb_method
     )
 
     stego_frames, pixel_offset = _embed_header_sequential(frames, header)
     payload_bits = bytes_to_bits(payload)
     stego_frames = _embed_bits_with_pixel_offset(
         stego_frames, payload_bits, pixel_offset=pixel_offset,
-        is_random=use_random, seed=seed
+        is_random=use_random, seed=seed, lsb_method=lsb_method
     )
 
     # Calculate how many frames contain embedded data for selective encoding
     total_bits_embedded = HEADER_BITS + payload_bits.size
-    frame_capacity_bits = capacity_332(frames[0])
+    cap_fn = get_capacity_fn(lsb_method)
+    frame_capacity_bits = cap_fn(frames[0])
     embedded_frame_count = _calculate_embedded_frame_count(total_bits_embedded, frame_capacity_bits)
 
     write_video_frames(output_path, stego_frames, fps, mp4_crf=mp4_crf,
@@ -338,7 +349,8 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
         "mse_list": mse_list,
         "psnr_avg": psnr_avg, "psnr_per_frame": psnr_list,
         "lossless_mp4": (mp4_crf == 0),
-        "embedded_frame_count": embedded_frame_count
+        "embedded_frame_count": embedded_frame_count,
+        "lsb_method": lsb_method,
     }
 
 
@@ -354,15 +366,22 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
     except Exception as e:
         print(f"⚠️ Header decode error: {e}. Using safe defaults.")
         meta = {"is_random": False, "is_encrypted": False, "payload_size": 0,
-                "num_frames": len(frames), "is_text": False, "extension": "", "filename": ""}
+                "num_frames": len(frames), "is_text": False, "extension": "", "filename": "",
+                "lsb_method": LSB_METHOD_332}
 
     is_random = meta["is_random"]
     is_encrypted = meta["is_encrypted"]
     payload_size = meta["payload_size"]
     num_frames = meta.get("num_frames", 0)
+    lsb_method = meta.get("lsb_method", LSB_METHOD_332)
+
+    # Validate lsb_method
+    if lsb_method not in LSB_METHOD_LABELS:
+        print(f"⚠️ Warning: Unknown LSB method {lsb_method}, defaulting to 3-3-2")
+        lsb_method = LSB_METHOD_332
 
     # Pre-check payload size sanity
-    if payload_size > total_capacity_bytes(frames):
+    if payload_size > total_capacity_bytes(frames, lsb_method):
         print(f"⚠️ Warning: Payload size {payload_size} > capacity. Header likely corrupt.")
         payload_size = 0
 
@@ -371,7 +390,8 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
 
     payload_bits = _extract_bits_with_pixel_offset(
         frames, num_bits=payload_size * 8, pixel_offset=pixel_offset,
-        is_random=is_random, seed=seed, original_num_frames=num_frames
+        is_random=is_random, seed=seed, original_num_frames=num_frames,
+        lsb_method=lsb_method
     )
     payload = bits_to_bytes(payload_bits)[:payload_size]
 
@@ -379,10 +399,12 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
         if a51_key is None: raise ValueError("a51_key needed")
         payload = a51_decrypt_payload(payload, a51_key)
 
+    method_label = LSB_METHOD_LABELS.get(lsb_method, "unknown")
     return {
         "message": payload, "is_text": meta["is_text"],
         "is_encrypted": is_encrypted, "is_random": is_random,
         "extension": meta["extension"], "filename": meta["filename"],
         "payload_size": payload_size, "format": "MP4",
-        "is_mp4": True
+        "is_mp4": True, "lsb_method": lsb_method,
+        "lsb_method_label": method_label,
     }

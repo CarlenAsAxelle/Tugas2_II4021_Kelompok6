@@ -6,12 +6,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import pytest
-from src.stego_lsb import (
-    bytes_to_bits, bits_to_bytes,
+from src.stego_lsb_utils import bytes_to_bits, bits_to_bytes, pixel_indices_random
+from src.stego_lsb_332 import (
     capacity_332,
     embed_bits_sequential_332, extract_bits_sequential_332,
     embed_bits_random_332, extract_bits_random_332,
-    pixel_indices_random
 )
 from src.video_io import read_video_frames
 

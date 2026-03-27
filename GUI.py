@@ -15,7 +15,11 @@ from src.stego_video     import embed_message as _embed_avi, extract_message as 
 from src.stego_video_mp4 import embed_message as _embed_mp4, extract_message as _extract_mp4
 from src.video_io        import read_video_frames as _read_avi, color_histogram_video, mse_psnr_video
 from src.video_io_mp4    import read_video_frames as _read_mp4
-from src.stego_lsb       import capacity_332
+from src.stego_lsb_utils import (
+    get_capacity_fn,
+    LSB_METHOD_332, LSB_METHOD_111, LSB_METHOD_444,
+    LSB_METHOD_LABELS, LSB_LABEL_TO_ID
+)
 
 def _read_video(path):
     """Read video frames, routing to correct backend by extension."""
@@ -112,6 +116,9 @@ class StegoApp:
               foreground=[("selected", TEXT)])
         s.configure("TScale",            background=BG, troughcolor=PANEL)
         s.configure("Horizontal.TScale", background=BG)
+        # Style for the LSB method combobox
+        s.configure("LSB.TCombobox", fieldbackground=CARD, background=CARD,
+                    foreground=TEXT, selectbackground=ACCENT2)
 
     def _setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -132,10 +139,36 @@ class StegoApp:
         root.columnconfigure(1, weight=2)
         root.rowconfigure(0, weight=1)
         root.rowconfigure(1, weight=0)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(2, weight=0)
 
-        left = tk.Frame(root, bg=PANEL, padx=12, pady=10)
-        left.grid(row=0, column=0, sticky="nsew", padx=(6,3), pady=6)
+        # ── Scrollable left panel ────────────────────────────────────────────
+        left_outer = tk.Frame(root, bg=PANEL)
+        left_outer.grid(row=0, column=0, sticky="nsew", padx=(6,3), pady=6)
+        left_outer.columnconfigure(0, weight=1)
+        left_outer.rowconfigure(0, weight=1)
+
+        left_canvas = tk.Canvas(left_outer, bg=PANEL, highlightthickness=0, bd=0)
+        left_canvas.grid(row=0, column=0, sticky="nsew")
+        left_sb = tk.Scrollbar(left_outer, orient="vertical", command=left_canvas.yview)
+        left_sb.grid(row=0, column=1, sticky="ns")
+        left_canvas.configure(yscrollcommand=left_sb.set)
+
+        left = tk.Frame(left_canvas, bg=PANEL, padx=12, pady=10)
+        left_win = left_canvas.create_window((0, 0), window=left, anchor="nw")
+
+        def _on_left_configure(e):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+        left.bind("<Configure>", _on_left_configure)
+
+        def _on_canvas_configure(e):
+            left_canvas.itemconfig(left_win, width=e.width)
+        left_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling
+        def _on_mousewheel(e):
+            left_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        left_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
         left.columnconfigure(0, weight=1)
         r = 0
 
@@ -144,6 +177,24 @@ class StegoApp:
         self.embed_select_btn.grid(row=r, column=0, sticky="ew"); r+=1
         self.embed_video_lbl = _make_label(left, "No video selected", fg=MUTED, bg=PANEL, font=("Segoe UI",8))
         self.embed_video_lbl.grid(row=r, column=0, sticky="w", pady=(2,0)); r+=1
+
+        # ── LSB method selector
+        _make_label(left, "LSB METHOD", fg=ACCENT, font=("Segoe UI",8,"bold"), bg=PANEL).grid(row=r, column=0, sticky="w", pady=(8,2)); r+=1
+        lsb_frame = tk.Frame(left, bg=PANEL)
+        lsb_frame.grid(row=r, column=0, sticky="ew"); r+=1
+        lsb_frame.columnconfigure(1, weight=1)
+        _make_label(lsb_frame, "Method:", fg=MUTED, font=("Segoe UI",8), bg=PANEL).grid(row=0, column=0, sticky="w", padx=(0,6))
+        self.lsb_method_var = tk.StringVar(value="3-3-2")
+        self.lsb_combo = ttk.Combobox(lsb_frame, textvariable=self.lsb_method_var,
+                                       values=["1-1-1", "3-3-2", "4-4-4"],
+                                       state="readonly", width=10,
+                                       font=("Consolas", 9))
+        self.lsb_combo.grid(row=0, column=1, sticky="w")
+        self.lsb_combo.bind("<<ComboboxSelected>>", self._on_lsb_method_change)
+
+        self.lsb_info_lbl = _make_label(left, "3-3-2: 8 bits/pixel — balanced capacity & stealth",
+                                         fg=MUTED, font=("Segoe UI",7), bg=PANEL)
+        self.lsb_info_lbl.grid(row=r, column=0, sticky="w", pady=(1,0)); r+=1
 
         # ── capacity bar
         cap_frame = tk.Frame(left, bg=CARD, padx=8, pady=6)
@@ -162,18 +213,18 @@ class StegoApp:
         # ── message
         _make_label(left, "MESSAGE (text)", fg=ACCENT, font=("Segoe UI",8,"bold"), bg=PANEL).grid(row=r, column=0, sticky="w"); r+=1
         _make_label(left, "Type here — or leave blank and select a file below", fg=MUTED, font=("Segoe UI",7), bg=PANEL).grid(row=r, column=0, sticky="w", pady=(0,3)); r+=1
-        self.message_entry = tk.Text(left, height=4, bg=CARD, fg=TEXT, insertbackground=TEXT, font=("Consolas",9), relief="flat", padx=6, pady=4)
+        self.message_entry = tk.Text(left, height=3, bg=CARD, fg=TEXT, insertbackground=TEXT, font=("Consolas",9), relief="flat", padx=6, pady=4)
         self.message_entry.grid(row=r, column=0, sticky="ew"); r+=1
         self.message_entry.bind("<KeyRelease>", self._on_message_change)
 
         file_row = tk.Frame(left, bg=PANEL)
-        file_row.grid(row=r, column=0, sticky="ew", pady=(6,0)); r+=1
+        file_row.grid(row=r, column=0, sticky="ew", pady=(4,0)); r+=1
         file_row.columnconfigure(1, weight=1)
         _make_btn(file_row, "📁  Select File to Embed", self._select_file_to_embed, bg=CARD, font=("Segoe UI",8)).grid(row=0, column=0, sticky="w")
         self.embed_file_lbl = _make_label(file_row, "No file selected", fg=MUTED, bg=PANEL, font=("Segoe UI",7))
         self.embed_file_lbl.grid(row=0, column=1, sticky="w", padx=(6,0))
 
-        tk.Frame(left, bg=ACCENT2, height=1).grid(row=r, column=0, sticky="ew", pady=8); r+=1
+        tk.Frame(left, bg=ACCENT2, height=1).grid(row=r, column=0, sticky="ew", pady=6); r+=1
 
         # ── encryption
         _make_label(left, "ENCRYPTION (A5/1)", fg=ACCENT, font=("Segoe UI",8,"bold"), bg=PANEL).grid(row=r, column=0, sticky="w"); r+=1
@@ -181,7 +232,7 @@ class StegoApp:
         tk.Checkbutton(left, text="Enable A5/1 Encryption", variable=self.encrypt_var, bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, font=("Segoe UI",9)).grid(row=r, column=0, sticky="w"); r+=1
         self.key_entry = tk.Entry(left, bg=CARD, fg=MUTED, insertbackground=TEXT, relief="flat", font=("Consolas",9))
         self.key_entry.insert(0, "e.g. 0x123456789ABCDEF0")
-        self.key_entry.grid(row=r, column=0, sticky="ew", pady=(2,6)); r+=1
+        self.key_entry.grid(row=r, column=0, sticky="ew", pady=(2,4)); r+=1
         self._bind_placeholder(self.key_entry, "e.g. 0x123456789ABCDEF0")
 
         # ── random
@@ -190,7 +241,7 @@ class StegoApp:
         tk.Checkbutton(left, text="Enable Random Pixel Order", variable=self.random_var, bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL, font=("Segoe UI",9)).grid(row=r, column=0, sticky="w"); r+=1
         self.stego_key_entry = tk.Entry(left, bg=CARD, fg=MUTED, insertbackground=TEXT, relief="flat", font=("Consolas",9))
         self.stego_key_entry.insert(0, "Stego key (integer)")
-        self.stego_key_entry.grid(row=r, column=0, sticky="ew", pady=(2,8)); r+=1
+        self.stego_key_entry.grid(row=r, column=0, sticky="ew", pady=(2,6)); r+=1
         self._bind_placeholder(self.stego_key_entry, "Stego key (integer)")
 
         self.embed_btn = _make_btn(left, "🔒  Embed Message", self._run_embed, bg=ACCENT, fg="white", font=("Segoe UI",10,"bold"))
@@ -221,6 +272,40 @@ class StegoApp:
         self.chart_frame = tk.Frame(root, bg=BG)
         self.chart_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=6, pady=4)
 
+    # ── LSB method change ────────────────────────────────────────────────────
+    def _on_lsb_method_change(self, event=None):
+        label = self.lsb_method_var.get()
+        info_map = {
+            "1-1-1": "1-1-1: 3 bits/pixel — minimal distortion, lowest capacity",
+            "3-3-2": "3-3-2: 8 bits/pixel — balanced capacity & stealth",
+            "4-4-4": "4-4-4: 12 bits/pixel — maximum capacity, most distortion",
+        }
+        self.lsb_info_lbl.config(text=info_map.get(label, ""))
+        self._recalculate_capacity()
+
+    def _get_lsb_method_id(self) -> int:
+        """Get the currently selected LSB method ID."""
+        return LSB_LABEL_TO_ID.get(self.lsb_method_var.get(), LSB_METHOD_332)
+
+    def _recalculate_capacity(self):
+        """Recalculate capacity based on loaded video and selected LSB method."""
+        if not self.video_frames:
+            self._capacity_bytes = 0
+            self._update_capacity_ui(0)
+            return
+        method_id = self._get_lsb_method_id()
+        cap_fn = get_capacity_fn(method_id)
+        cap = sum(cap_fn(f) for f in self.video_frames) // 8
+        self._capacity_bytes = cap
+        # Recalculate with current message size
+        text = self.message_entry.get("1.0", tk.END).strip()
+        if text:
+            self._update_capacity_ui(len(text.encode("utf-8")))
+        elif self._embed_file_bytes:
+            self._update_capacity_ui(self._embed_file_bytes)
+        else:
+            self._update_capacity_ui(0)
+
     # ── capacity bar ─────────────────────────────────────────────────────────
     def _update_capacity_ui(self, msg_size_bytes=0):
         cap    = self._capacity_bytes
@@ -232,7 +317,8 @@ class StegoApp:
             return
         needed = HEADER + msg_size_bytes
         pct    = min(needed / cap, 1.0)
-        self.cap_total_lbl.config(text=f"Total capacity: {_fmt_bytes(cap)}  (header: {HEADER} B)", fg=MUTED)
+        method_label = self.lsb_method_var.get()
+        self.cap_total_lbl.config(text=f"Total capacity ({method_label}): {_fmt_bytes(cap)}  (header: {HEADER} B)", fg=MUTED)
         if msg_size_bytes == 0:
             self.cap_used_lbl.config(text="Select a message to see usage", fg=MUTED)
         else:
@@ -241,7 +327,7 @@ class StegoApp:
             self.cap_used_lbl.config(
                 text=(f"Message: {_fmt_bytes(msg_size_bytes)}  +  Header: {_fmt_bytes(HEADER)}  "
                       f"=  {_fmt_bytes(needed)}  "
-                      f"({'✓ fits' if fits else '✗ TOO LARGE'})"),
+                      f"{'✓ fits' if fits else '✗ TOO LARGE'}"),
                 fg=color)
         self.cap_canvas.update_idletasks()
         W = self.cap_canvas.winfo_width() or 260
@@ -309,12 +395,17 @@ class StegoApp:
             self.embed_video_lbl.config(text="No video selected", fg=MUTED)
             self.embed_select_btn.config(text="📂  Select Cover Video", state="normal")
             self.embed_status.config(text="", fg=MUTED)
+            self.key_saved_label.config(text="")
+            self.metrics_label.config(text="MSE: —  |  PSNR: —", fg=SUCCESS)
+            for w in self.chart_frame.winfo_children(): w.destroy()
             self._update_capacity_ui(0)
 
     def _load_video_worker(self, path):
         try:
             frames, fps = _read_video(path)
-            cap = sum(capacity_332(f) for f in frames) // 8
+            method_id = self._get_lsb_method_id()
+            cap_fn = get_capacity_fn(method_id)
+            cap = sum(cap_fn(f) for f in frames) // 8
             fmt = _fmt_of(path)
             self.root.after(0, self._load_video_done, frames, fps, cap, fmt)
         except Exception as exc:
@@ -408,6 +499,9 @@ class StegoApp:
                 except ValueError:
                     messagebox.showerror("Error", f"Invalid stego key: '{raw}'"); return
 
+        # Get selected LSB method
+        lsb_method = self._get_lsb_method_id()
+
         # Output path — locked to same format as the input video
         fmt = self.video_format or 'avi'
         if fmt == 'mp4':
@@ -424,20 +518,22 @@ class StegoApp:
         if not output_path:
             return
 
+        method_label = self.lsb_method_var.get()
         self.embed_btn.config(state="disabled", text="⏳  Embedding…")
-        self.embed_status.config(text="Processing… please wait.", fg=WARNING)
+        self.embed_status.config(text=f"Processing ({method_label})… please wait.", fg=WARNING)
         self.key_saved_label.config(text="")
         self.metrics_label.config(text="MSE: —  |  PSNR: —")
+        for w in self.chart_frame.winfo_children(): w.destroy()
 
         threading.Thread(
             target=self._embed_worker,
             args=(msg, is_text, extension, filename,
-                  use_encrypt, a51_key, use_random, stego_key, output_path),
+                  use_encrypt, a51_key, use_random, stego_key, output_path, lsb_method),
             daemon=True
         ).start()
 
     def _embed_worker(self, msg, is_text, extension, filename,
-                      use_encrypt, a51_key, use_random, stego_key, output_path):
+                      use_encrypt, a51_key, use_random, stego_key, output_path, lsb_method):
         try:
             # Route to the correct backend based on output file format
             embed_fn = _embed_mp4 if _fmt_of(output_path) == 'mp4' else _embed_avi
@@ -445,7 +541,8 @@ class StegoApp:
                 cover_path=self.video_path, output_path=output_path,
                 message=msg, is_text=is_text, extension=extension, filename=filename,
                 use_encryption=use_encrypt, a51_key=a51_key,
-                use_random=use_random, stego_key=stego_key)
+                use_random=use_random, stego_key=stego_key,
+                lsb_method=lsb_method)
             cover_frames    = self.video_frames
             stego_frames, _ = _read_video(output_path)
             key_path = None
@@ -457,11 +554,13 @@ class StegoApp:
 
     def _embed_done(self, result, cover_frames, stego_frames, key_path):
         self.embed_btn.config(state="normal", text="🔒  Embed Message")
-        self.embed_status.config(text="✅  Embedding complete!", fg=SUCCESS)
+        method_label = LSB_METHOD_LABELS.get(result.get("lsb_method", LSB_METHOD_332), "3-3-2")
+        self.embed_status.config(text=f"✅  Embedding complete! (LSB: {method_label})", fg=SUCCESS)
         self.metrics_label.config(
             text=(f"MSE: {result['mse_avg']:.4f}  |  "
                   f"PSNR: {result['psnr_avg']:.2f} dB  |  "
-                  f"Capacity: {_fmt_bytes(result['total_capacity_bytes'])}"),
+                  f"Capacity: {_fmt_bytes(result['total_capacity_bytes'])}  |  "
+                  f"LSB: {method_label}"),
             fg=SUCCESS)
         if key_path:
             self.key_saved_label.config(text=f"🔑  Keys saved → {key_path}", fg=WARNING)
@@ -628,12 +727,14 @@ class StegoApp:
         self.extract_btn.config(state="normal", text="🔓  Extract Message")
         self.extract_status.config(text="✅  Extraction complete!", fg=SUCCESS)
 
-        mode_str = "Random" if result["is_random"] else "Sequential"
-        enc_str  = "Yes"    if result["is_encrypted"] else "No"
-        type_str = "Text"   if result["is_text"] else f"File ({result['extension'] or '.bin'})"
+        mode_str   = "Random" if result["is_random"] else "Sequential"
+        enc_str    = "Yes"    if result["is_encrypted"] else "No"
+        type_str   = "Text"   if result["is_text"] else f"File ({result['extension'] or '.bin'})"
+        method_str = result.get("lsb_method_label", "3-3-2")
         self.extract_meta_lbl.config(
             text=(f"Type: {type_str}   |   Mode: {mode_str}   |   "
-                  f"Encrypted: {enc_str}   |   Size: {_fmt_bytes(result['payload_size'])}"),
+                  f"Encrypted: {enc_str}   |   Size: {_fmt_bytes(result['payload_size'])}   |   "
+                  f"LSB: {method_str}"),
             fg=MUTED)
 
         if result["is_text"]:

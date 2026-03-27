@@ -5,7 +5,7 @@ import hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.a51_cipher import A51, a51_encrypt_payload, a51_decrypt_payload
-from src.stego_lsb import bytes_to_bits, bits_to_bytes
+from src.stego_lsb_utils import bytes_to_bits, bits_to_bytes
 
 def test_a51_roundtrip():
     """
