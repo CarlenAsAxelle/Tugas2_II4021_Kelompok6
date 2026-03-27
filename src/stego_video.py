@@ -129,7 +129,15 @@ def embed_message(cover_path, output_path, message, is_text,
 
     # Header + payload embedded together with the SAME mode.
     stego_frames = _spread_bits_to_frames(frames, all_bits, use_random, seed)
-    write_video_frames(output_path, stego_frames, fps)
+
+    # Calculate how many frames contain embedded data for selective encoding
+    cap_per_frame = capacity_332(frames[0])
+    total_bits_embedded = all_bits.size
+    embedded_frame_count = (total_bits_embedded + cap_per_frame - 1) // cap_per_frame
+
+    write_video_frames(output_path, stego_frames, fps,
+                      embedded_frame_count=embedded_frame_count,
+                      audio_source=cover_path)
 
     from src.video_io import mse_psnr_video
     mse_list, psnr_list, mse_avg, psnr_avg = mse_psnr_video(frames, stego_frames)
@@ -137,7 +145,8 @@ def embed_message(cover_path, output_path, message, is_text,
     return dict(total_capacity_bytes=total_cap, payload_size_bytes=len(payload),
                 header_size_bytes=HEADER_SIZE, total_embedded_bytes=needed,
                 mse_avg=mse_avg, mse_list=mse_list,
-                psnr_avg=psnr_avg, psnr_per_frame=psnr_list)
+                psnr_avg=psnr_avg, psnr_per_frame=psnr_list,
+                embedded_frame_count=embedded_frame_count)
 
 def extract_message(stego_path, a51_key=None, stego_key=None):
     """

@@ -13,9 +13,16 @@ import matplotlib.pyplot as plt
 
 from src.stego_video     import embed_message as _embed_avi, extract_message as _extract_avi
 from src.stego_video_mp4 import embed_message as _embed_mp4, extract_message as _extract_mp4
-from src.video_io_mp4    import read_video_frames         
-from src.video_io        import color_histogram_video, mse_psnr_video
+from src.video_io        import read_video_frames as _read_avi, color_histogram_video, mse_psnr_video
+from src.video_io_mp4    import read_video_frames as _read_mp4
 from src.stego_lsb       import capacity_332
+
+def _read_video(path):
+    """Read video frames, routing to correct backend by extension."""
+    if _fmt_of(path) == 'mp4':
+        return _read_mp4(path)
+    else:
+        return _read_avi(path)
 
 def _fmt_of(path):
     """Return lowercase extension without dot: 'avi' or 'mp4'."""
@@ -306,7 +313,7 @@ class StegoApp:
 
     def _load_video_worker(self, path):
         try:
-            frames, fps = read_video_frames(path)
+            frames, fps = _read_video(path)
             cap = sum(capacity_332(f) for f in frames) // 8
             fmt = _fmt_of(path)
             self.root.after(0, self._load_video_done, frames, fps, cap, fmt)
@@ -440,7 +447,7 @@ class StegoApp:
                 use_encryption=use_encrypt, a51_key=a51_key,
                 use_random=use_random, stego_key=stego_key)
             cover_frames    = self.video_frames
-            stego_frames, _ = read_video_frames(output_path)
+            stego_frames, _ = _read_video(output_path)
             key_path = None
             if use_encrypt or use_random:
                 key_path = self._save_key_file(output_path, a51_key, stego_key)

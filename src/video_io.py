@@ -1,6 +1,9 @@
 # src/video_io.py
 import cv2
 import numpy as np
+import subprocess
+import os
+import tempfile
 from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,28 +34,201 @@ def read_video_frames(path: str) -> Tuple[List[np.ndarray], float]:
     return frames, fps
 
 
-def write_video_frames(path: str, frames: List[np.ndarray], fps: float):
+def write_video_frames(path: str, frames: List[np.ndarray], fps: float,
+                       embedded_frame_count: int = 0,
+                       audio_source: str = None):
     """
-    Tulis list frame ke file AVI dengan codec lossless (FFv1).
+    Tulis list frame ke file AVI dengan codec lossless (FFV1).
+
+    Args:
+        path: Output file path
+        frames: List of BGR frames
+        fps: Frames per second
+        embedded_frame_count: Number of frames from start containing embedded data.
+                            If > 0, those frames use lossless encoding while
+                            remaining frames are JPEG-preprocessed for smaller size.
+        audio_source: Path to original video to copy audio from.
+                     If None, output will have no audio.
     """
     if not frames:
         raise ValueError("frames is empty")
 
+    if audio_source:
+        # Write video-only to temp, then mux audio from cover
+        ext = os.path.splitext(path)[1] or '.avi'
+        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+        os.close(temp_fd)
+        try:
+            _write_video_only(temp_path, frames, fps, embedded_frame_count)
+            _mux_audio(temp_path, audio_source, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    else:
+        _write_video_only(path, frames, fps, embedded_frame_count)
+
+
+def _write_video_only(path: str, frames: List[np.ndarray], fps: float,
+                      embedded_frame_count: int):
+    """Write video frames without audio."""
+    if embedded_frame_count > 0:
+        _write_avi_frames_selective(path, frames, fps, embedded_frame_count)
+    else:
+        _write_avi_frames_lossless(path, frames, fps)
+
+
+def _mux_audio(video_path: str, audio_source: str, output_path: str):
+    """Copy audio from audio_source into video_path, save as output_path."""
+    try:
+        _check_ffmpeg()
+    except EnvironmentError:
+        import shutil
+        shutil.copy2(video_path, output_path)
+        return
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,       # video (no audio)
+        "-i", audio_source,     # source of audio
+        "-c:v", "copy",         # don't re-encode video
+        "-c:a", "copy",         # don't re-encode audio
+        "-map", "0:v:0",        # take video from first input
+        "-map", "1:a?",         # take audio from second input (optional)
+        "-shortest",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        # If muxing fails (e.g., no audio in source), just copy video-only
+        import shutil
+        shutil.copy2(video_path, output_path)
+        print(f"[AUDIO] Mux failed, video-only output: {result.stderr.decode()[-200:]}")
+    else:
+        print(f"[AUDIO] Muxed audio from cover → {os.path.getsize(output_path):,} bytes")
+
+
+def _write_avi_frames_opencv(path: str, frames: List[np.ndarray], fps: float):
+    """Fallback: FFV1 via OpenCV (lossless, preserves LSBs)."""
     h, w, _ = frames[0].shape
-    # Use FFv1 which is lossless - essential for preserving LSBs in steganography
-    fourcc   = cv2.VideoWriter_fourcc(*"FFV1")
-    out      = cv2.VideoWriter(path, fourcc, fps, (w, h))
+    fourcc = cv2.VideoWriter_fourcc(*"FFV1")
+    out = cv2.VideoWriter(path, fourcc, fps, (w, h))
 
     if not out.isOpened():
-        # FFv1 might not be available, try with MJPEG as fallback (still better than XVID for LSBs)
-        print("Warning: FFv1 codec not available, using MJPG (lossless-ish) codec")
-        fourcc   = cv2.VideoWriter_fourcc(*"MJPG")
-        out      = cv2.VideoWriter(path, fourcc, fps, (w, h))
+        print("Warning: FFV1 codec not available, using MJPG codec")
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        out = cv2.VideoWriter(path, fourcc, fps, (w, h))
 
     for f in frames:
         out.write(f)
-
     out.release()
+
+
+def _check_ffmpeg():
+    """Pastikan ffmpeg tersedia di PATH."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True
+        )
+        if result.returncode != 0:
+            raise EnvironmentError()
+    except (FileNotFoundError, EnvironmentError):
+        raise EnvironmentError(
+            "ffmpeg tidak ditemukan. Install ffmpeg dan pastikan ada di PATH.\n"
+            "Windows: https://ffmpeg.org/download.html\n"
+            "Linux:   sudo apt install ffmpeg\n"
+            "Mac:     brew install ffmpeg"
+        )
+
+
+def _write_avi_frames_lossless(path: str, frames: List[np.ndarray], fps: float):
+    """Write AVI with FFV1 lossless codec via ffmpeg (better compression than OpenCV)."""
+    try:
+        _check_ffmpeg()
+    except EnvironmentError:
+        print("Warning: ffmpeg not available, falling back to OpenCV FFV1")
+        _write_avi_frames_opencv(path, frames, fps)
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        frame_pattern = os.path.join(tmpdir, "frame_%08d.png")
+        for i, frame in enumerate(frames):
+            fname = os.path.join(tmpdir, f"frame_{i+1:08d}.png")
+            cv2.imwrite(fname, frame)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-i", frame_pattern,
+            "-c:v", "ffv1",
+            "-level", "3",
+            "-slicecrc", "1",
+            path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg AVI lossless encoding failed:\n{result.stderr.decode()}"
+            )
+
+        print(f"[AVI LOSSLESS] FFV1 → {os.path.getsize(path):,} bytes")
+
+
+def _write_avi_frames_selective(path: str, frames: List[np.ndarray], fps: float,
+                                embedded_frame_count: int):
+    """
+    Selective AVI encoding:
+    - Frames 0..embedded_frame_count-1: Pixel-perfect (lossless FFV1)
+    - Frames embedded_frame_count..end: JPEG pre-compressed to reduce entropy
+    - All frames encoded as FFV1 (single codec, valid AVI container)
+
+    The JPEG round-trip on non-embedded frames discards high-frequency detail,
+    making FFV1 compress them significantly smaller while embedded frames
+    remain bit-perfect for LSB steganography.
+    """
+    try:
+        _check_ffmpeg()
+    except EnvironmentError:
+        print("Warning: ffmpeg not available, falling back to OpenCV FFV1")
+        _write_avi_frames_opencv(path, frames, fps)
+        return
+
+    if embedded_frame_count <= 0 or embedded_frame_count >= len(frames):
+        _write_avi_frames_lossless(path, frames, fps)
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        frame_pattern = os.path.join(tmpdir, "frame_%08d.png")
+        for i, frame in enumerate(frames):
+            out_frame = frame
+            if i >= embedded_frame_count:
+                # Lossy JPEG round-trip (quality 92 ≈ visually transparent)
+                _, buf = cv2.imencode('.jpg', frame,
+                                      [cv2.IMWRITE_JPEG_QUALITY, 92])
+                out_frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            fname = os.path.join(tmpdir, f"frame_{i+1:08d}.png")
+            cv2.imwrite(fname, out_frame)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-i", frame_pattern,
+            "-c:v", "ffv1",
+            "-level", "3",
+            "-slicecrc", "1",
+            path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg AVI selective encoding failed:\n{result.stderr.decode()}"
+            )
+
+        print(f"[SELECTIVE AVI] {embedded_frame_count} lossless + "
+              f"{len(frames) - embedded_frame_count} lossy → "
+              f"{os.path.getsize(path):,} bytes")
 
 
 # ─── METRICS ──────────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import numpy as np
 from typing import Optional
 
 from src.video_io_mp4 import (
-    read_video_frames, write_video_frames, get_format,
+    read_video_frames, write_video_frames,
     mse_psnr_video
 )
 from src.stego_lsb import (
@@ -293,12 +293,6 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
                   extension: str = "", filename: str = "", use_encryption: bool = False,
                   a51_key: Optional[int] = None, use_random: bool = False,
                   stego_key: Optional[int] = None, mp4_crf: int = 0) -> dict:
-    
-    in_fmt = get_format(cover_path)
-    out_fmt = get_format(output_path)
-    if in_fmt != out_fmt:
-        raise ValueError(f"Format mismatch: {in_fmt} vs {out_fmt}")
-    is_mp4 = (in_fmt == 'mp4')
 
     frames, fps = read_video_frames(cover_path)
 
@@ -316,7 +310,7 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
     header = encode_header(
         is_text=is_text, is_encrypted=use_encryption, is_random=use_random,
         extension=extension, filename=filename, payload_size=len(payload),
-        is_mp4=is_mp4, num_frames=len(frames)
+        is_mp4=True, num_frames=len(frames)
     )
 
     stego_frames, pixel_offset = _embed_header_sequential(frames, header)
@@ -331,28 +325,26 @@ def embed_message(cover_path: str, output_path: str, message: bytes, is_text: bo
     frame_capacity_bits = capacity_332(frames[0])
     embedded_frame_count = _calculate_embedded_frame_count(total_bits_embedded, frame_capacity_bits)
 
-    # For MP4, pass embedded_frame_count to enable selective lossless/lossy encoding
-    if is_mp4:
-        write_video_frames(output_path, stego_frames, fps, mp4_crf=mp4_crf, 
-                          embedded_frame_count=embedded_frame_count)
-    else:
-        write_video_frames(output_path, stego_frames, fps, mp4_crf=mp4_crf)
+    write_video_frames(output_path, stego_frames, fps, mp4_crf=mp4_crf,
+                      embedded_frame_count=embedded_frame_count,
+                      audio_source=cover_path)
 
-    _, psnr_list, mse_avg, psnr_avg = mse_psnr_video(frames, stego_frames)
+    mse_list, psnr_list, mse_avg, psnr_avg = mse_psnr_video(frames, stego_frames)
 
     return {
-        "format": in_fmt.upper(), "total_capacity_bytes": total_cap,
+        "format": "MP4", "total_capacity_bytes": total_cap,
         "payload_size_bytes": len(payload), "header_size_bytes": HEADER_SIZE,
         "total_embedded_bytes": needed, "mse_avg": mse_avg,
+        "mse_list": mse_list,
         "psnr_avg": psnr_avg, "psnr_per_frame": psnr_list,
-        "lossless_mp4": (is_mp4 and mp4_crf == 0),
-        "embedded_frame_count": embedded_frame_count if is_mp4 else None
+        "lossless_mp4": (mp4_crf == 0),
+        "embedded_frame_count": embedded_frame_count
     }
 
 
 def extract_message(stego_path: str, a51_key: Optional[int] = None,
                     stego_key: Optional[int] = None) -> dict:
-    
+
     frames, _ = read_video_frames(stego_path)
     seed = stego_key if stego_key is not None else 0
 
@@ -360,7 +352,6 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
     try:
         meta = decode_header(header_bytes)
     except Exception as e:
-        # Fallback if header is completely garbage
         print(f"⚠️ Header decode error: {e}. Using safe defaults.")
         meta = {"is_random": False, "is_encrypted": False, "payload_size": 0,
                 "num_frames": len(frames), "is_text": False, "extension": "", "filename": ""}
@@ -373,8 +364,8 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
     # Pre-check payload size sanity
     if payload_size > total_capacity_bytes(frames):
         print(f"⚠️ Warning: Payload size {payload_size} > capacity. Header likely corrupt.")
-        payload_size = 0 # Abort payload read safely
-    
+        payload_size = 0
+
     if num_frames > 0 and len(frames) > num_frames:
         frames = frames[:num_frames]
 
@@ -388,11 +379,10 @@ def extract_message(stego_path: str, a51_key: Optional[int] = None,
         if a51_key is None: raise ValueError("a51_key needed")
         payload = a51_decrypt_payload(payload, a51_key)
 
-    fmt = get_format(stego_path)
     return {
         "message": payload, "is_text": meta["is_text"],
         "is_encrypted": is_encrypted, "is_random": is_random,
         "extension": meta["extension"], "filename": meta["filename"],
-        "payload_size": payload_size, "format": fmt.upper(),
-        "is_mp4": meta.get("is_mp4", False)
+        "payload_size": payload_size, "format": "MP4",
+        "is_mp4": True
     }
