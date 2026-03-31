@@ -1,6 +1,6 @@
 # Video Steganography with A5/1 Encryption
 
-> **Tugas 2 — II4021 Kriptografi dan Koding**  
+> **Tugas 2 — II4021 Kriptografi**  
 > Kelompok 6
 
 Aplikasi steganografi video yang menyembunyikan pesan (teks maupun file) ke dalam video AVI/MP4 menggunakan metode **Modified LSB** (1-1-1, 3-3-2, 4-4-4) dengan enkripsi opsional **A5/1 stream cipher**.
