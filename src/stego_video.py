@@ -7,7 +7,7 @@ from src.video_io import read_video_frames, write_video_frames
 from src.stego_lsb_utils import (
     bytes_to_bits, bits_to_bytes,
     get_lsb_functions, get_capacity_fn, get_bits_per_pixel,
-    LSB_METHOD_332, LSB_METHOD_LABELS
+    LSB_METHOD_332, LSB_METHOD_111, LSB_METHOD_444, LSB_METHOD_LABELS
 )
 from src.a51_cipher import a51_encrypt_payload, a51_decrypt_payload
 

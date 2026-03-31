@@ -55,6 +55,12 @@ Tugas2_II4021_Kelompok6/
 
 - **Python** 3.9+
 - **ffmpeg** — harus tersedia di PATH
+- **opencv-python** 4.8.0+
+- **numpy** 1.24.0+
+- **pytest** 7.0+
+- **matplotlib** 3.5.0+
+- **PyQt5** 5.15.0+
+- **ffmpeg-python** 0.2.1+
 
 #### Install ffmpeg
 
@@ -115,6 +121,9 @@ pytest tests/ -v
 ---
 
 ## Arsitektur
+
+### Tech Stack 
+python 3.9+, OpenCV, NumPy, Matplotlib, Pillow, ffmpeg (system), ffmpeg-python
 
 ### Metode LSB
 

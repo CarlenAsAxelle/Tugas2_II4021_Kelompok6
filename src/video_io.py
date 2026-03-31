@@ -78,7 +78,11 @@ def _write_video_only(path: str, frames: List[np.ndarray], fps: float,
 
 
 def _mux_audio(video_path: str, audio_source: str, output_path: str):
-    """Copy audio from audio_source into video_path, save as output_path."""
+    """Copy audio from audio_source into video_path, save as output_path.
+
+    AVI containers do not support AAC/ADTS audio; audio is re-encoded to
+    MP3 for AVI output and copied directly for MP4 output.
+    """
     try:
         _check_ffmpeg()
     except EnvironmentError:
@@ -86,20 +90,21 @@ def _mux_audio(video_path: str, audio_source: str, output_path: str):
         shutil.copy2(video_path, output_path)
         return
 
+    audio_args = ["-c:a", "libmp3lame", "-q:a", "2"]
+
     cmd = [
         "ffmpeg", "-y",
-        "-i", video_path,       # video (no audio)
-        "-i", audio_source,     # source of audio
-        "-c:v", "copy",         # don't re-encode video
-        "-c:a", "copy",         # don't re-encode audio
-        "-map", "0:v:0",        # take video from first input
-        "-map", "1:a?",         # take audio from second input (optional)
+        "-i", video_path,
+        "-i", audio_source,
+        "-c:v", "copy",
+        *audio_args,
+        "-map", "0:v:0",
+        "-map", "1:a?",
         "-shortest",
         output_path
     ]
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
-        # If muxing fails (e.g., no audio in source), just copy video-only
         import shutil
         shutil.copy2(video_path, output_path)
         print(f"[AUDIO] Mux failed, video-only output: {result.stderr.decode()[-200:]}")
